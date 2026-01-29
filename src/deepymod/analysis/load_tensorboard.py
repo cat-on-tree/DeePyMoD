@@ -60,6 +60,8 @@ def plot_history(foldername: str):
 
     for history_key in history.keys():
         history_key_parts = history_key.split("_")
+
+        # === 1. 处理 loss ===
         if history_key_parts[0] == "loss":
             if history_key_parts[-1] == "0":
                 axs[0].semilogy(
@@ -79,109 +81,62 @@ def plot_history(foldername: str):
                     label=history_key_parts[1] + "_" + history_key_parts[-1],
                     linestyle="-",
                 )
-            if history_key_parts[0] == "remaining":
+            # 修正：remaining 逻辑通常不应嵌套在 loss 内部，或者需要更严格的判断
+            if history_key_parts[0] == "remaining" and len(history_key_parts) > 4:
                 axs[0].semilogy(
                     history[history_key],
-                    label=history_key_parts[1]
-                    + "_"
-                    + history_key_parts[3]
-                    + "_"
-                    + history_key_parts[4],
+                    label=f"{history_key_parts[1]}_{history_key_parts[3]}_{history_key_parts[4]}",
                     linestyle="-.",
                 )
+
+        # === 2. 处理 coeffs (报错点) ===
         if history_key_parts[0] == "coeffs":
-            if history_key_parts[2] == "0":
-                axs[1].plot(
-                    history[history_key],
-                    label=history_key_parts[2]
-                    + "_"
-                    + history_key_parts[3]
-                    + "_"
-                    + history_key_parts[4],
-                    linestyle="--",
-                )
-            elif history_key_parts[2] == "1":
-                axs[1].plot(
-                    history[history_key],
-                    label=history_key_parts[2]
-                    + "_"
-                    + history_key_parts[3]
-                    + "_"
-                    + history_key_parts[4],
-                    linestyle=":",
-                )
+            # 动态构建 label，防止越界
+            # 如果长度够长，使用原来的格式
+            if len(history_key_parts) >= 5:
+                label_str = f"{history_key_parts[2]}_{history_key_parts[3]}_{history_key_parts[4]}"
             else:
-                axs[1].plot(
-                    history[history_key],
-                    label=history_key_parts[2]
-                    + "_"
-                    + history_key_parts[3]
-                    + "_"
-                    + history_key_parts[4],
-                    linestyle="-",
-                )
+                # 长度不够，就把剩下的部分全拼起来
+                label_str = "_".join(history_key_parts[2:])
+
+            # 确保索引 2 存在
+            if len(history_key_parts) > 2:
+                if history_key_parts[2] == "0":
+                    axs[1].plot(history[history_key], label=label_str, linestyle="--")
+                elif history_key_parts[2] == "1":
+                    axs[1].plot(history[history_key], label=label_str, linestyle=":")
+                else:
+                    axs[1].plot(history[history_key], label=label_str, linestyle="-")
+
+        # === 3. 处理 unscaled ===
         if history_key_parts[0] == "unscaled":
-            if history_key_parts[3] == "0":
-                axs[2].plot(
-                    history[history_key],
-                    label=history_key_parts[3]
-                    + "_"
-                    + history_key_parts[4]
-                    + "_"
-                    + history_key_parts[5],
-                    linestyle="--",
-                )
-            elif history_key_parts[3] == "1":
-                axs[2].plot(
-                    history[history_key],
-                    label=history_key_parts[3]
-                    + "_"
-                    + history_key_parts[4]
-                    + "_"
-                    + history_key_parts[5],
-                    linestyle=":",
-                )
+            if len(history_key_parts) >= 6:
+                label_str = f"{history_key_parts[3]}_{history_key_parts[4]}_{history_key_parts[5]}"
             else:
-                axs[2].plot(
-                    history[history_key],
-                    label=history_key_parts[3]
-                    + "_"
-                    + history_key_parts[4]
-                    + "_"
-                    + history_key_parts[5],
-                    linestyle="-",
-                )
+                label_str = "_".join(history_key_parts[3:])
+
+            if len(history_key_parts) > 3:
+                if history_key_parts[3] == "0":
+                    axs[2].plot(history[history_key], label=label_str, linestyle="--")
+                elif history_key_parts[3] == "1":
+                    axs[2].plot(history[history_key], label=label_str, linestyle=":")
+                else:
+                    axs[2].plot(history[history_key], label=label_str, linestyle="-")
+
+        # === 4. 处理 estimator ===
         if history_key_parts[0] == "estimator":
-            if history_key_parts[3] == "0":
-                axs[3].plot(
-                    history[history_key],
-                    label=history_key_parts[3]
-                    + "_"
-                    + history_key_parts[4]
-                    + "_"
-                    + history_key_parts[5],
-                    linestyle="--",
-                )
-            elif history_key_parts[3] == "1":
-                axs[3].plot(
-                    history[history_key],
-                    label=history_key_parts[3]
-                    + "_"
-                    + history_key_parts[4]
-                    + "_"
-                    + history_key_parts[5],
-                    linestyle=":",
-                )
+            if len(history_key_parts) >= 6:
+                label_str = f"{history_key_parts[3]}_{history_key_parts[4]}_{history_key_parts[5]}"
             else:
-                axs[3].plot(
-                    history[history_key],
-                    label=history_key_parts[3]
-                    + "_"
-                    + history_key_parts[4]
-                    + "_"
-                    + history_key_parts[5],
-                    linestyle="-",
-                )
+                label_str = "_".join(history_key_parts[3:])
+
+            if len(history_key_parts) > 3:
+                if history_key_parts[3] == "0":
+                    axs[3].plot(history[history_key], label=label_str, linestyle="--")
+                elif history_key_parts[3] == "1":
+                    axs[3].plot(history[history_key], label=label_str, linestyle=":")
+                else:
+                    axs[3].plot(history[history_key], label=label_str, linestyle="-")
 
     # axs[0].set_ylim([-2, 2])
     axs[1].set_ylim([-2, 2])
