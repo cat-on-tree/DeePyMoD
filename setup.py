@@ -1,23 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-    Setup file for deepymod_torch.
-    Use setup.cfg to configure your project.
-
-    This file was generated with PyScaffold 3.2.
-    PyScaffold helps you to put up the scaffold of your new Python project.
-    Learn more under: https://pyscaffold.org/
+Setup file for DeePyMoD.
 """
 import sys
-
-from pkg_resources import require, VersionConflict
 from setuptools import setup
 
 try:
-    require("setuptools>=38.3")
-except VersionConflict:
-    print("Error: version of setuptools is too old (<38.3)!")
-    sys.exit(1)
-
+    import setuptools
+    from packaging.version import Version
+    if Version(setuptools.__version__) < Version("38.3"):
+        print("Error: version of setuptools is too old (<38.3)!")
+        sys.exit(1)
+except Exception:
+    # 检查失败时不阻断，交给 pip/setuptools 后续报错
+    pass
 
 if __name__ == "__main__":
     setup(use_pyscaffold=True)
