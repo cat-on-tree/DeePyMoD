@@ -32,6 +32,8 @@ def init_report_run(project_root="..", run_name=None):
     report_md = os.path.join(run_dir, "report.md")
     manifest_json = os.path.join(run_dir, "manifest.json")
 
+    DEFAULT_BIN_EDGES = [0.0, 1.0, 4.0, 8.0, 24.0]
+
     manifest = {
         "run_id": run_id,
         "created_at": datetime.now().isoformat(),
@@ -44,6 +46,9 @@ def init_report_run(project_root="..", run_name=None):
             "artifacts_dir": artifacts_dir,
             "report_md": report_md,
             "manifest_json": manifest_json,
+        },
+        "config": {
+            "bin_edges": DEFAULT_BIN_EDGES,
         },
         "status": {
             "step1_initialized": True
@@ -112,6 +117,9 @@ def write_report_skeleton(manifest: dict):
 ### 4.2 各候选最优参数与初值
 （待填充表：`tables/multistart_summary.csv`）
 
+### 4.3 各候选参数表
+（待填充）
+
 ---
 
 ## 5. 群体验证与模型比较
@@ -122,14 +130,17 @@ def write_report_skeleton(manifest: dict):
 ### 5.2 模型排序结论
 （待填充）
 
+### 5.3 NLME 参数估计
+（待填充）
+
 ---
 
 ## 6. 诊断图
 
-### 6.1 GOF
-（待填充图）
+### 6.1 模型汇总
+（待填充）
 
-### 6.2 残差/RSE
+### 6.2 GOF 与残差
 （待填充图）
 
 ### 6.3 Bootstrap

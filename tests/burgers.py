@@ -12,7 +12,7 @@ from deepymod.training import train
 from deepymod.training.sparsity_scheduler import TrainTestPeriodic, Periodic, TrainTest
 
 from deepymod.data import Dataset
-from deepymod.data.burgers import BurgersDelta
+from deepymod.data.burgers import burgers_delta
 
 from deepymod.analysis import load_tensorboard
 
@@ -34,7 +34,7 @@ A = 1.0
 x = np.linspace(-3, 4, 100)
 t = np.linspace(0.5, 5.0, 50)
 x_grid, t_grid = np.meshgrid(x, t, indexing="ij")
-dataset = Dataset(BurgersDelta, v=v, A=A)
+dataset = Dataset(burgers_delta, v=v, A=A)
 X, y = dataset.create_dataset(
     x_grid.reshape(-1, 1),
     t_grid.reshape(-1, 1),
