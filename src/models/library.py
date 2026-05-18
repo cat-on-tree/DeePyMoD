@@ -53,8 +53,7 @@ class ModularPDLibrary(Library):
 
     Notes:
     - This library focuses on the primary PD state (R) for sparse discovery.
-    - Latent states (e.g., T1/T2/T3, Tol, Ce) can be used in candidate terms
-      but are not constrained by their own ODEs in this version.
+    - Latent states can be constrained with their own ODEs using module-scoped terms.
     """
     def __init__(self, module_combo: str, module_terms=None, state_specs=None):
         super().__init__()
@@ -65,7 +64,9 @@ class ModularPDLibrary(Library):
         self.raw_gamma = nn.Parameter(torch.tensor(2.0))
 
         self.state_names = self._build_state_names(module_combo)
-        self._term_names = self._build_term_names(module_combo)
+        self.equation_terms = self._build_equation_terms(module_combo)
+        self.equation_order = ["R"] + [s for s in self.state_names if s != "R" and s in self.equation_terms]
+        self._term_names = self.equation_terms["R"]
 
     def _build_state_names(self, module_combo: str):
         modules = module_combo.split("+")
@@ -80,18 +81,30 @@ class ModularPDLibrary(Library):
                 names.append(s)
         return names
 
-    def _build_term_names(self, module_combo: str):
+    def _build_equation_terms(self, module_combo: str):
         modules = module_combo.split("+")
-        terms = []
+        eq_terms = {"R": []}
         for mod in modules:
             mod_terms = self.module_terms.get(mod, {})
-            for t in mod_terms.get("R", []):
-                if t not in terms:
-                    terms.append(t)
-        return terms
+            for state, terms in mod_terms.items():
+                eq_terms.setdefault(state, [])
+                for t in terms:
+                    if t not in eq_terms[state]:
+                        eq_terms[state].append(t)
+        # ensure R terms exist
+        if not eq_terms.get("R"):
+            eq_terms["R"] = ["1", "R"]
+        # fallback minimal constraint for latent states without explicit terms
+        for s in self.state_names:
+            if s not in eq_terms:
+                eq_terms[s] = [s]
+        return eq_terms
 
     def term_names(self):
         return list(self._term_names)
+
+    def equation_term_counts(self):
+        return [len(self.equation_terms[s]) for s in self.equation_order]
 
     def _eval_base_term(self, term, ctx, ec50, gamma):
         if term == "1":
@@ -126,7 +139,6 @@ class ModularPDLibrary(Library):
 
     def library(self, input):
         pred, data = input
-        device = pred.device
 
         # Map state outputs
         state_map = {name: pred[:, i:i+1] for i, name in enumerate(self.state_names)}
@@ -144,20 +156,23 @@ class ModularPDLibrary(Library):
             **{k: v for k, v in state_map.items() if k != "R"}
         }
 
-        # dR/dt
-        R = ctx["R"]
-        dR_ddata = grad(
-            R, data,
-            grad_outputs=torch.ones_like(R),
-            create_graph=True,
-            retain_graph=True
-        )[0]
-        dRdt = dR_ddata[:, 0:1]
-
         ec50 = F.softplus(self.raw_ec50) + 1e-8
         gamma = F.softplus(self.raw_gamma) + 1e-8
 
-        theta_cols = [self._eval_term(term, ctx, ec50, gamma) for term in self._term_names]
-        theta = torch.cat(theta_cols, dim=1)
+        dts, thetas = [], []
+        for s in self.equation_order:
+            X = ctx[s]
+            dX_ddata = grad(
+                X, data,
+                grad_outputs=torch.ones_like(X),
+                create_graph=True,
+                retain_graph=True
+            )[0]
+            dXdt = dX_ddata[:, 0:1]
+            terms = self.equation_terms[s]
+            theta_cols = [self._eval_term(term, ctx, ec50, gamma) for term in terms]
+            theta = torch.cat(theta_cols, dim=1)
+            dts.append(dXdt)
+            thetas.append(theta)
 
-        return [dRdt], [theta]
+        return dts, thetas
