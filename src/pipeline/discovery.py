@@ -2,8 +2,8 @@ import numpy as np
 import torch
 from deepymod import DeepMoD
 
-from src.models.network import TimeOnlyNet
-from src.models.library import PDLibraryExpanded
+from src.models.network import TimeOnlyNet, ModularTimeNet
+from src.models.library import PDLibraryExpanded, ModularPDLibrary
 from src.models.estimator import FixedMaskEstimator
 from src.models.constraint import RidgeConstraint
 
@@ -16,6 +16,7 @@ from src.training.pruning import prune_mask_general
 from src.training.ranking import rank_topk_validation_bic
 
 from src.data.preprocess_pkpd import to_population_mean, build_tensors_from_agg, split_train_val
+from src.configs.pd_module_registry import MODULE_COMBINATIONS
 
 
 def run_single_discovery(
@@ -23,20 +24,19 @@ def run_single_discovery(
     active_model: str,
     config: dict,
     device: str = None,
+    module_combo: str = None,
 ):
     """
     输入:
       pop_data: columns [sid, time, C_obs, R_obs]
       active_model: e.g. "IDR_INHIB_KIN_SIG"
       config: 超参数字典（可用 src/configs/defaults.py 的 DEFAULTS）
+      module_combo: e.g. "idr+delay" (optional). If None, use legacy single-state library.
     返回:
       dict(results)
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    term_names = PDLibraryExpanded.term_names()
-    n_terms = len(term_names)
 
     # 1) preprocess
     agg = to_population_mean(pop_data)
@@ -51,10 +51,17 @@ def run_single_discovery(
     train_loader = build_train_loader(X_train, Y_train, device=device)
 
     # 2) model init
-    init_mask = torch.ones(n_terms, dtype=torch.bool, device=device)
+    if module_combo:
+        network = ModularTimeNet(module_combo=module_combo).to(device)
+        library = ModularPDLibrary(module_combo=module_combo).to(device)
+        term_names = library.term_names()
+    else:
+        network = TimeOnlyNet().to(device)
+        library = PDLibraryExpanded().to(device)
+        term_names = PDLibraryExpanded.term_names()
 
-    network = TimeOnlyNet().to(device)
-    library = PDLibraryExpanded().to(device)
+    n_terms = len(term_names)
+    init_mask = torch.ones(n_terms, dtype=torch.bool, device=device)
     estimator = FixedMaskEstimator(init_mask).to(device)
     constraint = RidgeConstraint(lam=config["ridge_lam"]).to(device)
 
@@ -145,6 +152,8 @@ def run_single_discovery(
 
     print("\n=== Selected (Top-1) ===")
     print("ACTIVE_MODEL:", active_model)
+    if module_combo:
+        print("MODULE_COMBO:", module_combo)
     print("terms:", best["terms"])
     print(
         f"BIC_val={best['score']:.6f}, "
@@ -157,6 +166,7 @@ def run_single_discovery(
 
     return {
         "active_model": active_model,
+        "module_combo": module_combo,
         "best": best,
         "top_results": top_results,
         "ec50_hat": ec50_hat,
@@ -166,3 +176,26 @@ def run_single_discovery(
         "agg": agg,
         "raw": raw,
     }
+
+
+def run_module_discovery(
+    pop_data,
+    active_model: str,
+    config: dict,
+    device: str = None,
+    module_combos=None,
+):
+    module_combos = module_combos or MODULE_COMBINATIONS
+    results = {}
+    for combo in module_combos:
+        print("\n=============================")
+        print(f"[Module combo] {combo}")
+        print("=============================")
+        results[combo] = run_single_discovery(
+            pop_data=pop_data,
+            active_model=active_model,
+            config=config,
+            device=device,
+            module_combo=combo,
+        )
+    return results
