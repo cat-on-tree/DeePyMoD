@@ -36,7 +36,6 @@ def enforce_hierarchy(mask_np, name_to_idx, extra_rules=None):
     all_rules = {}
     all_rules.update(HIERARCHY_RULES)
     if extra_rules:
-        # convert list-based rules to single parent enforcement by OR
         for child, parents in extra_rules.items():
             if isinstance(parents, (list, tuple)):
                 all_rules[child] = list(parents)
@@ -58,18 +57,17 @@ def enforce_hierarchy(mask_np, name_to_idx, extra_rules=None):
     return m
 
 
-def prune_mask_general(
+def _prune_single(
     coeff: torch.Tensor,
     old_mask: torch.Tensor,
     term_names,
-    active_model: str,
+    protected_terms,
     rel_thr_main=0.10,
     rel_thr_interaction=0.15,
     min_terms_keep=2,
 ):
     term_names = np.array(term_names)
     name_to_idx = {n: i for i, n in enumerate(term_names)}
-    protected_terms = PROTECTED_TERMS_MAP.get(active_model, {"1"})
 
     c = coeff.detach().cpu().numpy()
     m = old_mask.detach().cpu().numpy().astype(bool)
@@ -116,3 +114,48 @@ def prune_mask_general(
 
     changed = not np.array_equal(new_m, m)
     return torch.tensor(new_m, dtype=torch.bool, device=old_mask.device), changed
+
+
+def prune_mask_general(
+    coeff,
+    old_mask,
+    term_names,
+    active_model: str,
+    rel_thr_main=0.10,
+    rel_thr_interaction=0.15,
+    min_terms_keep=2,
+):
+    """
+    Supports both single-equation and multi-equation pruning.
+
+    - coeff: torch.Tensor or list[torch.Tensor]
+    - old_mask: torch.Tensor or list[torch.Tensor]
+    - term_names: list[str] or list[list[str]]
+    """
+    protected_terms = PROTECTED_TERMS_MAP.get(active_model, {"1"})
+
+    if isinstance(coeff, (list, tuple)):
+        new_masks, changed_any = [], False
+        for c, m, names in zip(coeff, old_mask, term_names):
+            new_m, changed = _prune_single(
+                coeff=c,
+                old_mask=m,
+                term_names=names,
+                protected_terms=protected_terms,
+                rel_thr_main=rel_thr_main,
+                rel_thr_interaction=rel_thr_interaction,
+                min_terms_keep=min_terms_keep,
+            )
+            new_masks.append(new_m)
+            changed_any = changed_any or changed
+        return new_masks, changed_any
+
+    return _prune_single(
+        coeff=coeff,
+        old_mask=old_mask,
+        term_names=term_names,
+        protected_terms=protected_terms,
+        rel_thr_main=rel_thr_main,
+        rel_thr_interaction=rel_thr_interaction,
+        min_terms_keep=min_terms_keep,
+    )
