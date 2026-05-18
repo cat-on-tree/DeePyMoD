@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 
+from src.configs.pd_module_registry import HIERARCHY_RULES as MODULE_HIERARCHY_RULES
+
 
 PROTECTED_TERMS_MAP = {
     "IDR_BASE": {"1", "R"},
@@ -29,11 +31,29 @@ HIERARCHY_RULES = {
 }
 
 
-def enforce_hierarchy(mask_np, name_to_idx):
+def enforce_hierarchy(mask_np, name_to_idx, extra_rules=None):
     m = mask_np.copy()
-    for child, parent in HIERARCHY_RULES.items():
-        ci, pi = name_to_idx[child], name_to_idx[parent]
-        if m[ci] and not m[pi]:
+    all_rules = {}
+    all_rules.update(HIERARCHY_RULES)
+    if extra_rules:
+        # convert list-based rules to single parent enforcement by OR
+        for child, parents in extra_rules.items():
+            if isinstance(parents, (list, tuple)):
+                all_rules[child] = list(parents)
+            else:
+                all_rules[child] = [parents]
+    for child, parents in all_rules.items():
+        if child not in name_to_idx:
+            continue
+        ci = name_to_idx[child]
+        if not m[ci]:
+            continue
+        ok = False
+        for parent in parents:
+            if parent in name_to_idx and m[name_to_idx[parent]]:
+                ok = True
+                break
+        if not ok:
             m[ci] = False
     return m
 
@@ -81,13 +101,13 @@ def prune_mask_general(
             for i in act:
                 new_m[i] = (i == best)
 
-    new_m = enforce_hierarchy(new_m, name_to_idx)
+    new_m = enforce_hierarchy(new_m, name_to_idx, extra_rules=MODULE_HIERARCHY_RULES)
 
     if new_m.sum() < min_terms_keep:
         order = np.argsort(-np.abs(c))
         for i in order:
             new_m[i] = True
-            new_m = enforce_hierarchy(new_m, name_to_idx)
+            new_m = enforce_hierarchy(new_m, name_to_idx, extra_rules=MODULE_HIERARCHY_RULES)
             if new_m.sum() >= min_terms_keep:
                 break
         for t in protected_terms:
