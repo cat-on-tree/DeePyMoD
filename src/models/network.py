@@ -60,3 +60,24 @@ class ModularTimeNet(nn.Module):
         t = x[:, 0:1]
         pred = self.net(t)
         return pred, x
+
+
+class StateTimeNet(nn.Module):
+    """
+    Time-only network with explicit state names (for specialized libraries).
+    """
+    def __init__(self, state_names, hidden=64):
+        super().__init__()
+        self.state_names = list(state_names)
+        out_dim = len(self.state_names)
+
+        self.net = nn.Sequential(
+            nn.Linear(1, hidden), nn.Tanh(),
+            nn.Linear(hidden, hidden), nn.Tanh(),
+            nn.Linear(hidden, out_dim),
+        )
+
+    def forward(self, x):
+        t = x[:, 0:1]
+        pred = self.net(t)
+        return pred, x

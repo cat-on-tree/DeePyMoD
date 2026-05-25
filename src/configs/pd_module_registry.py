@@ -55,6 +55,7 @@ STATE_SPECS = {
     "direct":   {"states": ["R"], "latent": []},
     "idr":      {"states": ["R"], "latent": []},
     "tgi":      {"states": ["R"], "latent": []},
+    "tmdd":     {"states": ["R", "CpR"], "latent": ["CpR"]},
 
     "delay":    {"states": ["T1", "T2", "T3"], "latent": ["T1", "T2", "T3"]},
     "feedback": {"states": ["T4", "T5", "T6"], "latent": ["T4", "T5", "T6"]},
@@ -114,4 +115,6 @@ HIERARCHY_RULES = {
     "Hill(T3)*R": ["Hill(T3)", "R"],
     "Hill(T6)*R": ["Hill(T6)", "R"],
     "Tol*R": ["Tol", "R"],
+    "CpR*R": ["CpR", "R"],
+    "C-Ct": ["C", "Ct"],
 }

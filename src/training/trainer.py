@@ -31,6 +31,8 @@ def train_epochs(
         yb = yb.to(next(model.parameters()).device)
 
         pred, dts, ths = model(xb)
+        if pred.shape[1] != yb.shape[1]:
+            pred = pred[:, : yb.shape[1]]
         mse = torch.mean((pred - yb) ** 2)
 
         coeffs = model.constraint_coeffs(sparse=True, scaled=False)
@@ -69,12 +71,21 @@ def eval_mse(model, X_eval, Y_eval):
     xb = X_eval.to(device).clone().detach().requires_grad_(True)
     yb = Y_eval.to(device)
     pred, _, _ = model(xb)
+    if pred.shape[1] != yb.shape[1]:
+        pred = pred[:, : yb.shape[1]]
     mse = torch.mean((pred - yb) ** 2)
     return float(mse.item())
 
 
 def get_coeff_and_mask(model):
     constraint = model.constraint
-    mask = constraint.sparsity_masks[0].detach().clone()
-    coeff = model.constraint_coeffs(sparse=True, scaled=False)[0].detach().flatten()
+    masks = constraint.sparsity_masks
+    coeffs = model.constraint_coeffs(sparse=True, scaled=False)
+    if len(masks) > 1:
+        return (
+            [c.detach().flatten() for c in coeffs],
+            [m.detach().clone() for m in masks],
+        )
+    mask = masks[0].detach().clone()
+    coeff = coeffs[0].detach().flatten()
     return coeff, mask

@@ -56,6 +56,12 @@ def sample_individual_params(tv_pk, omega_pk, tv_pd, omega_pd):
 
 
 def _bateman_conc(p):
+    # [新增] IV bolus 分支
+    if p.get("ka", 0.0) <= 0:
+        C_dense = (p["F"] * p["D"] / p["V"]) * np.exp(-p["ke"] * t_dense)
+        return np.clip(C_dense, 0.0, None)
+
+    # [原有] 口服 Bateman
     pre = (p["F"] * p["D"] * p["ka"]) / (p["V"] * (p["ka"] - p["ke"]))
     C_dense = pre * (np.exp(-p["ke"] * t_dense) - np.exp(-p["ka"] * t_dense))
     return np.clip(C_dense, 0.0, None)
@@ -318,11 +324,17 @@ def simulate_subject(cfg, p):
             dPD2 = p["Kout_PD1"] * PD1 - p["Kout_PD2"] * PD2
             return [dA1, dCp, dCt, dR, dCpR, dPD1, dPD2]
 
-        A10 = p["F"] * p["D"]
+        if p.get("ka", 0.0) <= 0:
+            A10 = 0.0
+            Cp0 = (p["F"] * p["D"]) / V2
+        else:
+            A10 = p["F"] * p["D"]
+            Cp0 = 0.0
+
         R0 = p["Kin_R"] / p["Kout_R"]
         PD10 = p["Kin_PD1m"] / p["Kout_PD1"]
         PD20 = PD10 * p["Kout_PD1"] / p["Kout_PD2"]
-        z0 = [A10, 0.0, 0.0, R0, 0.0, PD10, PD20]
+        z0 = [A10, Cp0, 0.0, R0, 0.0, PD10, PD20]
         z_dense = odeint(lambda z, tt: rhs(z, tt), z0, t_dense)
         C_dense = np.clip(z_dense[:, 1], 0.0, None)
         C_func = interp1d(t_dense, C_dense, kind="cubic", fill_value="extrapolate")

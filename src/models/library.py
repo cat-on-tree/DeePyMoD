@@ -101,7 +101,9 @@ class ModularPDLibrary(Library):
         return eq_terms
 
     def term_names(self):
-        return list(self._term_names)
+        if len(self.equation_order) <= 1:
+            return list(self._term_names)
+        return [list(self.equation_terms[s]) for s in self.equation_order]
 
     def equation_term_counts(self):
         return [len(self.equation_terms[s]) for s in self.equation_order]

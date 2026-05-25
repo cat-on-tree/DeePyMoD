@@ -53,3 +53,28 @@ def generate_population_data(
     if return_pk_scale:
         return pop_data, subject_params, cfg, pk_scale_by_sid
     return pop_data, subject_params, cfg
+
+def self_check_models(seed=42, n_subjects=2, verbose=True):
+    """
+    遍历 MODEL_REGISTRY，尝试生成少量数据。
+    """
+    from src.configs.pkpd_registry import MODEL_REGISTRY
+    ok, failed = [], {}
+    for name in MODEL_REGISTRY.keys():
+        try:
+            _ = generate_population_data(
+                model_name=name,
+                seed=seed,
+                n_subjects=n_subjects,
+                extra_pk_iiv_sigma=0.0,
+                return_pk_scale=False,
+            )
+            ok.append(name)
+            if verbose:
+                print(f"[OK] {name}")
+        except Exception as e:
+            failed[name] = str(e)
+            if verbose:
+                print(f"[FAIL] {name} -> {e}")
+
+    return {"ok": ok, "failed": failed}

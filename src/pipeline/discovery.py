@@ -2,8 +2,9 @@ import numpy as np
 import torch
 from deepymod import DeepMoD
 
-from src.models.network import TimeOnlyNet, ModularTimeNet
+from src.models.network import TimeOnlyNet, ModularTimeNet, StateTimeNet
 from src.models.library import PDLibraryExpanded, ModularPDLibrary
+from src.models.library_antibody import AntibodyTMDDLibrary
 from src.models.estimator import FixedMaskEstimator
 from src.models.constraint import RidgeConstraint
 
@@ -51,7 +52,15 @@ def run_single_discovery(
     train_loader = build_train_loader(X_train, Y_train, device=device)
 
     # 2) model init
-    if module_combo:
+    use_tmdd_library = active_model in {"TMDD_BASE", "ANTIBODY_PKPD"}
+    if use_tmdd_library:
+        module_combo = None
+    if use_tmdd_library:
+        use_ct = (active_model == "ANTIBODY_PKPD")
+        library = AntibodyTMDDLibrary(use_ct=use_ct, include_hill=True).to(device)
+        network = StateTimeNet(state_names=library.state_names).to(device)
+        term_names = library.term_names()
+    elif module_combo:
         network = ModularTimeNet(module_combo=module_combo).to(device)
         library = ModularPDLibrary(module_combo=module_combo).to(device)
         term_names = library.term_names()
@@ -60,8 +69,19 @@ def run_single_discovery(
         library = PDLibraryExpanded().to(device)
         term_names = PDLibraryExpanded.term_names()
 
-    n_terms = len(term_names)
-    init_mask = torch.ones(n_terms, dtype=torch.bool, device=device)
+    is_multi = (
+        isinstance(term_names, (list, tuple))
+        and len(term_names) > 0
+        and isinstance(term_names[0], (list, tuple, np.ndarray))
+    )
+    if is_multi:
+        init_mask = [
+            torch.ones(len(names), dtype=torch.bool, device=device)
+            for names in term_names
+        ]
+    else:
+        n_terms = len(term_names)
+        init_mask = torch.ones(n_terms, dtype=torch.bool, device=device)
     estimator = FixedMaskEstimator(init_mask).to(device)
     constraint = RidgeConstraint(lam=config["ridge_lam"]).to(device)
 
@@ -96,12 +116,22 @@ def run_single_discovery(
             min_terms_keep=config["min_terms_keep"],
         )
 
-        old_terms = np.array(term_names)[mask.detach().cpu().numpy().astype(bool)]
-        new_terms = np.array(term_names)[new_mask.detach().cpu().numpy().astype(bool)]
+        if is_multi:
+            old_terms = [
+                list(np.array(names)[m.detach().cpu().numpy().astype(bool)])
+                for names, m in zip(term_names, mask)
+            ]
+            new_terms = [
+                list(np.array(names)[m.detach().cpu().numpy().astype(bool)])
+                for names, m in zip(term_names, new_mask)
+            ]
+        else:
+            old_terms = np.array(term_names)[mask.detach().cpu().numpy().astype(bool)]
+            new_terms = np.array(term_names)[new_mask.detach().cpu().numpy().astype(bool)]
 
         print(f"Round {rd}:")
-        print("  active(old):", list(old_terms))
-        print("  active(new):", list(new_terms))
+        print("  active(old):", old_terms if is_multi else list(old_terms))
+        print("  active(new):", new_terms if is_multi else list(new_terms))
 
         if not changed:
             stable_cnt += 1
@@ -112,7 +142,10 @@ def run_single_discovery(
         else:
             stable_cnt = 0
             estimator.set_mask(new_mask)
-            constraint.sparsity_masks = [new_mask]
+            if is_multi:
+                constraint.sparsity_masks = new_mask
+            else:
+                constraint.sparsity_masks = [new_mask]
             last = run_train_loop(
                 model, train_loader, opt_nn, opt_lib,
                 n_epochs=config["n_epochs_prune"],

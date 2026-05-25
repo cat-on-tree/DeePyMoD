@@ -15,6 +15,8 @@ PROTECTED_TERMS_MAP = {
     "DIRECT_SIGEMAX": {"1"},
     "BIOPHASE_EMAX": {"1"},
     "BIOPHASE_SIGEMAX": {"1"},
+    "TMDD_BASE": {"1", "R"},
+    "ANTIBODY_PKPD": {"1", "R"},
 }
 
 EXCLUSIVE_GROUPS = [
