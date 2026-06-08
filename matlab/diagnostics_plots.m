@@ -65,6 +65,15 @@ function diagnostics_plots(data_csv, simbio_csv, topk_json, out_fig_dir, binEdge
     % 如果 simbio_csv 没有 EC50/gamma 列（向后兼容），使用默认值
     has_ec50_gamma = ismember('EC50', R.Properties.VariableNames) && ismember('gamma', R.Properties.VariableNames);
 
+    mech_rank = nan(height(R), 1);
+    mech_converged = false(height(R), 1);
+    mech_has_tmdd = false(height(R), 1);
+    mech_gamma_lb = false(height(R), 1);
+    mech_ec50_bound = false(height(R), 1);
+    mech_neg_state_ratio = nan(height(R), 1);
+    mech_state_explosion = false(height(R), 1);
+    mech_residual_bias = nan(height(R), 1);
+
     % -------- 逐候选诊断 --------
     for i = 1:height(R)
         rank_i = i;
@@ -72,92 +81,127 @@ function diagnostics_plots(data_csv, simbio_csv, topk_json, out_fig_dir, binEdge
             rank_i = double(R.rank(i));
             if ~isfinite(rank_i), rank_i = i; end
         end
-
-        terms_str = string(R.terms{i});
-        raw_terms = terms_str;
-        if ~isempty(topk_candidates)
-            cand = get_candidate_by_rank(topk_candidates, rank_i);
-            if isstruct(cand) && isfield(cand, 'terms') && ~isempty(cand.terms)
-                raw_terms = cand.terms;
+        mech_rank(i) = rank_i;
+        mech_converged(i) = logical(R.converged(i));
+        try
+            terms_str = string(R.terms{i});
+            raw_terms = terms_str;
+            if ~isempty(topk_candidates)
+                cand = get_candidate_by_rank(topk_candidates, rank_i);
+                if isstruct(cand) && isfield(cand, 'terms') && ~isempty(cand.terms)
+                    raw_terms = cand.terms;
+                end
             end
-        end
-        [eq_terms, flat_terms, terms_label] = parse_candidate_terms(raw_terms);
+            [eq_terms, flat_terms, terms_label] = parse_candidate_terms(raw_terms);
+            has_tmdd_terms = candidate_has_tmdd_terms(flat_terms);
+            mech_has_tmdd(i) = has_tmdd_terms;
 
-        if ~R.converged(i)
-            fprintf('[Rank %d] %s: not converged, skip.\n', rank_i, terms_label);
-            continue;
-        end
-
-        p = numel(flat_terms);
-        if p == 0
-            fprintf('[Rank %d] %s: parsed empty terms, skip.\n', rank_i, terms_str);
-            continue;
-        end
-
-        % 读取该候选的 theta（theta1, theta2, ...）
-        theta = zeros(p, 1);
-        missing_cols = {};
-        for k = 1:p
-            col = sprintf('theta%d', k);
-            if ismember(col, R.Properties.VariableNames)
-                theta(k) = double(R{i, col});
+            if has_ec50_gamma
+                ec50_i = double(R{i, 'EC50'});
+                gamma_i = double(R{i, 'gamma'});
             else
-                missing_cols{end+1} = col; %#ok<AGROW>
+                ec50_i = EC50;
+                gamma_i = gamma;
             end
-        end
-        if ~isempty(missing_cols)
-            fprintf('[Rank %d] %s: missing theta columns (%s) for p=%d, skip.\n', ...
-                rank_i, terms_label, strjoin(missing_cols, ', '), p);
+            if isnan(ec50_i), ec50_i = EC50; end
+            if isnan(gamma_i), gamma_i = gamma; end
+            mech_gamma_lb(i) = (gamma_i <= 1.05);
+            mech_ec50_bound(i) = (ec50_i <= 0.55) || (ec50_i >= 19.5);
+
+            if ~R.converged(i)
+                fprintf('[Rank %d] %s: not converged, skip.\n', rank_i, terms_label);
+                continue;
+            end
+
+            p = numel(flat_terms);
+            if p == 0
+                fprintf('[Rank %d] %s: parsed empty terms, skip.\n', rank_i, terms_str);
+                continue;
+            end
+
+            % 读取该候选的 theta（theta1, theta2, ...）
+            theta = zeros(p, 1);
+            missing_cols = {};
+            for k = 1:p
+                col = sprintf('theta%d', k);
+                if ismember(col, R.Properties.VariableNames)
+                    theta(k) = double(R{i, col});
+                else
+                    missing_cols{end+1} = col; %#ok<AGROW>
+                end
+            end
+            if ~isempty(missing_cols)
+                fprintf('[Rank %d] %s: missing theta columns (%s) for p=%d, skip.\n', ...
+                    rank_i, terms_label, strjoin(missing_cols, ', '), p);
+                continue;
+            end
+
+            fprintf('[Rank %d] %s: theta = [%s], EC50 = %.4f, gamma = %.4f\n', ...
+                rank_i, terms_label, num2str(theta', '%.4f '), ec50_i, gamma_i);
+
+            % ---- (1) ODE 预测所有 subject ----
+            all_states = [];
+            ypred_all = []; yobs_all = []; t_all = []; sid_all = [];
+            for s = 1:nSub
+                [yhat, states_hat] = simulate_subject_dispatch(theta, subj{s}.t, subj{s}.c, subj{s}.y(1), eq_terms, ec50_i, gamma_i);
+                m = min(numel(subj{s}.y), numel(yhat));
+                ypred_all = [ypred_all; yhat(1:m)];
+                yobs_all  = [yobs_all;  subj{s}.y(1:m)];
+                t_all     = [t_all;     subj{s}.t(1:m)];
+                sid_all   = [sid_all;   repmat(sid_u(s), m, 1)];
+                if ~isempty(states_hat)
+                    all_states = [all_states; states_hat(1:m, :)]; %#ok<AGROW>
+                end
+            end
+            resid = ypred_all - yobs_all;
+            mech_residual_bias(i) = mean(resid);
+            if ~isempty(all_states)
+                valid_state = isfinite(all_states);
+                neg_mask = valid_state & (all_states < -1e-6);
+                denom = sum(valid_state(:));
+                if denom > 0
+                    mech_neg_state_ratio(i) = sum(neg_mask(:)) / denom;
+                end
+                mech_state_explosion(i) = any(valid_state(:) & (abs(all_states(:)) > 1e4));
+            end
+
+            % ---- (2) GOF 图 ----
+            prefix = sprintf('m%d', i);
+            plot_gof(ypred_all, yobs_all, t_all, sid_all, prefix, out_fig_dir);
+
+            % ---- (3) 残差图 ----
+            plot_residual(resid, t_all, prefix, out_fig_dir);
+
+            % ---- (4) VPC ----
+            plot_vpc(subj, theta, eq_terms, ec50_i, gamma_i, binEdges, prefix, out_fig_dir);
+
+            % ---- (5) Bootstrap ----
+            if ~skip_bootstrap
+                [n_ok, boot_theta] = bootstrap_refit(subj, eq_terms, theta, ec50_i, gamma_i, 100, 20260420 + i);
+                plot_bootstrap(boot_theta, theta, flat_terms, prefix, out_fig_dir);
+                fprintf('  -> Boot=%d/100\n', n_ok);
+            else
+                fprintf('  -> Bootstrap skipped\n');
+            end
+        catch ME
+            err_file = fullfile(out_fig_dir, sprintf('m%d_error.txt', i));
+            fid = fopen(err_file, 'w');
+            if fid ~= -1
+                fprintf(fid, '[Rank %d] Diagnostics error: %s\n\n', rank_i, ME.message);
+                fprintf(fid, '%s\n', getReport(ME, 'extended', 'hyperlinks', 'off'));
+                fclose(fid);
+            end
+            fprintf('[Rank %d] diagnostics error, skipped. See %s\n', rank_i, err_file);
             continue;
-        end
-
-        % 读取该候选的 EC50/gamma（从 simbio_results 表中读取）
-        if has_ec50_gamma
-            ec50_i = double(R{i, 'EC50'});
-            gamma_i = double(R{i, 'gamma'});
-        else
-            ec50_i = EC50;   % 保持全局默认值
-            gamma_i = gamma;
-        end
-
-        % 如果仍是默认值（NaN），回退到全局 EC50/gamma
-        if isnan(ec50_i), ec50_i = EC50; end
-        if isnan(gamma_i), gamma_i = gamma; end
-
-        fprintf('[Rank %d] %s: theta = [%s], EC50 = %.4f, gamma = %.4f\n', ...
-            rank_i, terms_label, num2str(theta', '%.4f '), ec50_i, gamma_i);
-
-        % ---- (1) ODE 预测所有 subject ----
-        ypred_all = []; yobs_all = []; t_all = []; sid_all = [];
-        for s = 1:nSub
-            yhat = simulate_subject_dispatch(theta, subj{s}.t, subj{s}.c, subj{s}.y(1), eq_terms, ec50_i, gamma_i);
-            m = min(numel(subj{s}.y), numel(yhat));
-            ypred_all = [ypred_all; yhat(1:m)];
-            yobs_all  = [yobs_all;  subj{s}.y(1:m)];
-            t_all     = [t_all;     subj{s}.t(1:m)];
-            sid_all   = [sid_all;   repmat(sid_u(s), m, 1)];
-        end
-        resid = ypred_all - yobs_all;
-
-        % ---- (2) GOF 图 ----
-        prefix = sprintf('m%d', i);
-        plot_gof(ypred_all, yobs_all, t_all, sid_all, prefix, out_fig_dir);
-
-        % ---- (3) 残差图 ----
-        plot_residual(resid, t_all, prefix, out_fig_dir);
-
-        % ---- (4) VPC ----
-        plot_vpc(subj, theta, eq_terms, ec50_i, gamma_i, binEdges, prefix, out_fig_dir);
-
-        % ---- (5) Bootstrap ----
-        if ~skip_bootstrap
-            [n_ok, boot_theta] = bootstrap_refit(subj, eq_terms, theta, ec50_i, gamma_i, 100, 20260420 + i);
-            plot_bootstrap(boot_theta, theta, flat_terms, prefix, out_fig_dir);
-            fprintf('  -> Boot=%d/100\n', n_ok);
-        else
-            fprintf('  -> Bootstrap skipped\n');
         end
     end
+
+    mech_tbl = table( ...
+        mech_rank, mech_converged, mech_has_tmdd, mech_gamma_lb, mech_ec50_bound, ...
+        mech_neg_state_ratio, mech_state_explosion, mech_residual_bias, ...
+        'VariableNames', {'rank','converged','has_tmdd_terms','gamma_at_lower_bound','ec50_at_bound', ...
+                          'neg_state_ratio','state_explosion_flag','residual_bias'});
+    writetable(mech_tbl, fullfile(out_fig_dir, 'mechanism_checks.csv'));
 
     fprintf('Done. Figures in %s\n', out_fig_dir);
 end
@@ -391,16 +435,16 @@ end
 % ==============================================================================
 % ODE 积分
 % ==============================================================================
-function yhat = simulate_subject_dispatch(theta, t, c, R0, eq_terms, EC50, gamma)
+function [yhat, state_hat] = simulate_subject_dispatch(theta, t, c, R0, eq_terms, EC50, gamma)
     if numel(eq_terms) > 1
-        yhat = simulate_subject_multi(theta, t, c, R0, eq_terms, EC50, gamma);
+        [yhat, state_hat] = simulate_subject_multi(theta, t, c, R0, eq_terms, EC50, gamma);
     else
-        yhat = simulate_subject_single(theta, t, c, R0, eq_terms{1}, EC50, gamma);
+        [yhat, state_hat] = simulate_subject_single(theta, t, c, R0, eq_terms{1}, EC50, gamma);
     end
 end
 
 
-function yhat = simulate_subject_single(theta, t, c, R0, terms, EC50, gamma)
+function [yhat, state_hat] = simulate_subject_single(theta, t, c, R0, terms, EC50, gamma)
     t = t(:); c = c(:);
     [t, ord] = sort(t); c = c(ord);
 
@@ -408,6 +452,7 @@ function yhat = simulate_subject_single(theta, t, c, R0, terms, EC50, gamma)
     cu = c(ia);
     if numel(tu) < 2
         yhat = ones(size(t)) * R0;
+        state_hat = [yhat, nan(size(yhat)), nan(size(yhat))];
         return;
     end
 
@@ -416,10 +461,11 @@ function yhat = simulate_subject_single(theta, t, c, R0, terms, EC50, gamma)
     [tsol, Rsol] = ode45(ode, [tu(1) tu(end)], R0);
     yhat = interp1(tsol, Rsol(:), t, 'linear', 'extrap');
     yhat = yhat(:);
+    state_hat = [yhat, nan(size(yhat)), nan(size(yhat))];
 end
 
 
-function yhat = simulate_subject_multi(theta, t, c, R0, eq_terms, EC50, gamma)
+function [yhat, state_hat] = simulate_subject_multi(theta, t, c, R0, eq_terms, EC50, gamma)
     t = t(:); c = c(:);
     [t, ord] = sort(t); c = c(ord);
 
@@ -427,6 +473,7 @@ function yhat = simulate_subject_multi(theta, t, c, R0, eq_terms, EC50, gamma)
     cu = c(ia);
     if numel(tu) < 2
         yhat = ones(size(t)) * R0;
+        state_hat = [yhat, nan(size(yhat)), nan(size(yhat))];
         return;
     end
 
@@ -439,6 +486,11 @@ function yhat = simulate_subject_multi(theta, t, c, R0, eq_terms, EC50, gamma)
     [tsol, Xsol] = ode45(ode, [tu(1) tu(end)], x0);
     yhat = interp1(tsol, Xsol(:,1), t, 'linear', 'extrap');
     yhat = yhat(:);
+    state_hat = nan(numel(t), 3);
+    state_hat(:, 1) = yhat;
+    for iState = 2:min(size(Xsol,2), 3)
+        state_hat(:, iState) = interp1(tsol, Xsol(:, iState), t, 'linear', 'extrap');
+    end
 end
 
 
@@ -721,6 +773,18 @@ function flat = flatten_eq_terms(eq_terms)
     flat = {};
     for iEq = 1:numel(eq_terms)
         flat = [flat, eq_terms{iEq}]; %#ok<AGROW>
+    end
+end
+
+
+function tf = candidate_has_tmdd_terms(flat_terms)
+    tf = false;
+    for k = 1:numel(flat_terms)
+        key = lower(strrep(strtrim(char(string(flat_terms{k}))), ' ', ''));
+        if contains(key, 'cpr') || strcmp(key, 'ct') || strcmp(key, 'c-ct')
+            tf = true;
+            return;
+        end
     end
 end
 
