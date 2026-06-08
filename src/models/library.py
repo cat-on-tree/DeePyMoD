@@ -11,12 +11,14 @@ from src.configs.pd_module_registry import MODULE_TERMS, STATE_SPECS
 class PDLibraryExpanded(Library):
     """
     theta columns:
-      0:1, 1:R, 2:C, 3:C^2, 4:Emax(C), 5:Hill(C), 6:C*R, 7:Emax(C)*R, 8:Hill(C)*R
+      0:1, 1:R, 2:C, 3:C^2, 4:Emax(C), 5:Hill(C), 6:C*R, 7:Emax(C)*R, 8:Hill(C)*R,
+      9:R^2, 10:exp(-t), 11:exp(-t)*R
     """
     def __init__(self):
         super().__init__()
         self.raw_ec50 = nn.Parameter(torch.tensor(4.0))
         self.raw_gamma = nn.Parameter(torch.tensor(2.0))
+        self.raw_tau = nn.Parameter(torch.tensor(1.0))
 
     def library(self, input):
         pred, data = input
@@ -33,18 +35,22 @@ class PDLibraryExpanded(Library):
         C = data[:, 1:2].clamp_min(1e-8)
         ec50 = F.softplus(self.raw_ec50) + 1e-8
         gamma = F.softplus(self.raw_gamma) + 1e-8
+        t = data[:, 0:1]
+        tau = F.softplus(self.raw_tau) + 1e-8
+        t_shift = t - torch.min(t)
+        exp_t = torch.exp(-t_shift / tau)
 
         emax = C / (ec50 + C)
         hill = (C ** gamma) / (ec50 ** gamma + C ** gamma)
 
         one = torch.ones_like(R)
-        theta = torch.cat([one, R, C, C * C, emax, hill, C * R, emax * R, hill * R], dim=1)
+        theta = torch.cat([one, R, C, C * C, emax, hill, C * R, emax * R, hill * R, R * R, exp_t, exp_t * R], dim=1)
 
         return [dRdt], [theta]
 
     @staticmethod
     def term_names():
-        return ["1", "R", "C", "C^2", "Emax(C)", "Hill(C)", "C*R", "Emax(C)*R", "Hill(C)*R"]
+        return ["1", "R", "C", "C^2", "Emax(C)", "Hill(C)", "C*R", "Emax(C)*R", "Hill(C)*R", "R^2", "exp(-t)", "exp(-t)*R"]
 
 
 class ModularPDLibrary(Library):
@@ -120,7 +126,8 @@ class ModularPDLibrary(Library):
             x = ctx.get(var)
             if x is None:
                 return torch.zeros_like(ctx["R"])
-            return (x ** gamma) / (ec50 ** gamma + x ** gamma)
+            x_safe = x.clamp_min(1e-8)
+            return (x_safe ** gamma) / (ec50 ** gamma + x_safe ** gamma)
         if term.startswith("Emax(") and term.endswith(")"):
             var = term[5:-1]
             x = ctx.get(var)
@@ -131,6 +138,9 @@ class ModularPDLibrary(Library):
             return torch.cos(2 * np.pi * ctx["t"] / 24.0)
         if term == "sin(2pi*t/24)":
             return torch.sin(2 * np.pi * ctx["t"] / 24.0)
+        if term == "exp(-t)":
+            t_shift = ctx["t"] - torch.min(ctx["t"])
+            return torch.exp(-t_shift)
         raise ValueError(f"Unknown term: {term}")
 
     def _eval_term(self, term, ctx, ec50, gamma):
@@ -149,12 +159,15 @@ class ModularPDLibrary(Library):
         t = data[:, 0:1]
         C = data[:, 1:2].clamp_min(1e-8) if data.shape[1] >= 2 else torch.zeros_like(t)
         C_int = data[:, 2:3].clamp_min(1e-8) if data.shape[1] >= 3 else torch.zeros_like(t)
+        Ct = data[:, 3:4].clamp_min(0.0) if data.shape[1] >= 4 else torch.zeros_like(t)
 
         ctx = {
             "t": t,
             "R": state_map.get("R"),
             "C": C,
             "C_int": C_int,
+            "Ct": Ct,
+            "C-Ct": C - Ct,
             **{k: v for k, v in state_map.items() if k != "R"}
         }
 

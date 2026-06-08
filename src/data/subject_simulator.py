@@ -3,6 +3,7 @@ from scipy.integrate import odeint
 from scipy.interpolate import interp1d
 
 from src.configs.pkpd_registry import t_dense, t_obs, pk_noise_cv, pd_noise_cv
+from src.data.pk_profiles import simulate_pk_profile
 
 
 def hill(C, EC50, gamma):
@@ -31,6 +32,7 @@ def sample_individual_params(tv_pk, omega_pk, tv_pd, omega_pd):
 
     keys = [
         "E0","S","Emax","EC50","gamma","ke0","Kin","Kout","Imax","Smax",
+        "k_resp",
         "Kon","Koff","keDR","Kin_R","Kout_R","Kin_PD1m","Kout_PD1","Kout_PD2",
         "Emax1","Emax2","EC50_2","gamma2","kt1","kt2",
         "Kin_Rm","Kin_Rb","phi1","Kin_PD1m","Kin_PD1b","phi2",
@@ -55,28 +57,47 @@ def sample_individual_params(tv_pk, omega_pk, tv_pd, omega_pd):
     return p
 
 
-def _bateman_conc(p):
-    # [新增] IV bolus 分支
-    if p.get("ka", 0.0) <= 0:
-        C_dense = (p["F"] * p["D"] / p["V"]) * np.exp(-p["ke"] * t_dense)
-        return np.clip(C_dense, 0.0, None)
+def _bateman_conc(p, dose_scale=1.0):
+    pk_params = dict(p)
+    pk_params["D"] = float(pk_params.get("D", 0.0)) * float(dose_scale)
+    return simulate_pk_profile(
+        t_dense,
+        route="bolus" if p.get("ka", 0.0) <= 0 else "oral",
+        compartments=1,
+        pk_params=pk_params,
+    )
 
-    # [原有] 口服 Bateman
-    pre = (p["F"] * p["D"] * p["ka"]) / (p["V"] * (p["ka"] - p["ke"]))
-    C_dense = pre * (np.exp(-p["ke"] * t_dense) - np.exp(-p["ka"] * t_dense))
-    return np.clip(C_dense, 0.0, None)
 
-
-def simulate_subject(cfg, p):
+def simulate_subject(
+    cfg,
+    p,
+    pk_route=None,
+    pk_compartments=None,
+    dose_scale=1.0,
+    observation_times=None,
+    noise_scale=1.0,
+):
     fam = cfg["family"]
     eff = cfg.get("effect_form", None)
+    use_explicit_pk = (pk_route is not None) or (pk_compartments is not None)
+    pk_params = dict(p)
+    pk_params["D"] = float(pk_params.get("D", 0.0)) * float(dose_scale)
 
     # Standard PK (Bateman) for most models
-    C_dense = _bateman_conc(p)
+    if use_explicit_pk:
+        C_dense = simulate_pk_profile(
+            t_dense,
+            route=(pk_route or "oral"),
+            compartments=int(pk_compartments or 1),
+            pk_params=pk_params,
+        )
+    else:
+        C_dense = _bateman_conc(pk_params, dose_scale=1.0)
     C_func = interp1d(t_dense, C_dense, kind="cubic", fill_value="extrapolate")
 
     if fam == "direct":
         E0 = p["E0"]
+        k_resp = float(p.get("k_resp", 0.0))
         if eff == "linear":
             E_dense = E0 + p["S"] * C_dense
         elif eff == "emax":
@@ -85,7 +106,15 @@ def simulate_subject(cfg, p):
             E_dense = E0 + p["Emax"] * np.array([hill(c, p["EC50"], p["gamma"]) for c in C_dense])
         else:
             raise ValueError(f"Unknown direct effect_form: {eff}")
-        R_dense = E_dense
+        if k_resp <= 1e-8:
+            R_dense = E_dense
+        else:
+            E_func = interp1d(t_dense, E_dense, kind="cubic", fill_value="extrapolate")
+
+            def rhs(R, t):
+                return k_resp * (float(E_func(t)) - R)
+
+            R_dense = odeint(lambda r, tt: rhs(r, tt), E0, t_dense).flatten()
 
     elif fam == "biophase":
         E0 = p["E0"]
@@ -309,45 +338,84 @@ def simulate_subject(cfg, p):
         R_dense = z_dense[:, 2]
 
     elif fam == "antibody":
-        V2 = p.get("V2", p["V"])
-        Vt = p.get("Vt", V2)
+        if not use_explicit_pk:
+            V2 = p.get("V2", p["V"])
+            Vt = p.get("Vt", V2)
 
-        def rhs(z, t):
-            A1, Cp, Ct, R, CpR, PD1, PD2 = z
-            dA1 = -p["ka"] * A1
-            dCp = (p["ka"] / V2) * A1 - p["CLp"] * Cp / V2 - p["Q"] * (Cp - Ct) / V2 - p["Kon"] * Cp * R + p["Koff"] * CpR
-            dCt = p["Q"] * (Cp - Ct) / Vt
-            dR = p["Kin_R"] - p["Kout_R"] * R - p["Kon"] * Cp * R + p["Koff"] * CpR
-            dCpR = p["Kon"] * Cp * R - p["Koff"] * CpR - p["keDR"] * CpR
-            E1 = emax_hill(CpR, p["Emax1"], p["EC50"], p["gamma"])
-            dPD1 = p["Kin_PD1m"] * (1 + E1) - p["Kout_PD1"] * PD1
-            dPD2 = p["Kout_PD1"] * PD1 - p["Kout_PD2"] * PD2
-            return [dA1, dCp, dCt, dR, dCpR, dPD1, dPD2]
+            def rhs(z, t):
+                A1, Cp, Ct, R, CpR, PD1, PD2 = z
+                dA1 = -p["ka"] * A1
+                dCp = (p["ka"] / V2) * A1 - p["CLp"] * Cp / V2 - p["Q"] * (Cp - Ct) / V2 - p["Kon"] * Cp * R + p["Koff"] * CpR
+                dCt = p["Q"] * (Cp - Ct) / Vt
+                dR = p["Kin_R"] - p["Kout_R"] * R - p["Kon"] * Cp * R + p["Koff"] * CpR
+                dCpR = p["Kon"] * Cp * R - p["Koff"] * CpR - p["keDR"] * CpR
+                E1 = emax_hill(CpR, p["Emax1"], p["EC50"], p["gamma"])
+                dPD1 = p["Kin_PD1m"] * (1 + E1) - p["Kout_PD1"] * PD1
+                dPD2 = p["Kout_PD1"] * PD1 - p["Kout_PD2"] * PD2
+                return [dA1, dCp, dCt, dR, dCpR, dPD1, dPD2]
 
-        if p.get("ka", 0.0) <= 0:
-            A10 = 0.0
-            Cp0 = (p["F"] * p["D"]) / V2
+            if p.get("ka", 0.0) <= 0:
+                A10 = 0.0
+                Cp0 = (p["F"] * p["D"]) / V2
+            else:
+                A10 = p["F"] * p["D"]
+                Cp0 = 0.0
+
+            R0 = p["Kin_R"] / p["Kout_R"]
+            PD10 = p["Kin_PD1m"] / p["Kout_PD1"]
+            PD20 = PD10 * p["Kout_PD1"] / p["Kout_PD2"]
+            z0 = [A10, Cp0, 0.0, R0, 0.0, PD10, PD20]
+            z_dense = odeint(lambda z, tt: rhs(z, tt), z0, t_dense)
+            C_dense = np.clip(z_dense[:, 1], 0.0, None)
+            C_func = interp1d(t_dense, C_dense, kind="cubic", fill_value="extrapolate")
+            R_dense = z_dense[:, 6]
         else:
-            A10 = p["F"] * p["D"]
-            Cp0 = 0.0
+            use_ct = int(pk_compartments or 1) >= 2
+            k_ct = p.get("Q", 0.0) / max(p.get("Vt", p.get("V", 10.0)), 1e-8)
 
-        R0 = p["Kin_R"] / p["Kout_R"]
-        PD10 = p["Kin_PD1m"] / p["Kout_PD1"]
-        PD20 = PD10 * p["Kout_PD1"] / p["Kout_PD2"]
-        z0 = [A10, Cp0, 0.0, R0, 0.0, PD10, PD20]
-        z_dense = odeint(lambda z, tt: rhs(z, tt), z0, t_dense)
-        C_dense = np.clip(z_dense[:, 1], 0.0, None)
-        C_func = interp1d(t_dense, C_dense, kind="cubic", fill_value="extrapolate")
-        R_dense = z_dense[:, 6]
+            def rhs(z, t):
+                C_now = float(C_func(t))
+                if use_ct:
+                    R, CpR, Ct, PD1, PD2 = z
+                    C_bind = Ct
+                    dCt = k_ct * (C_now - Ct)
+                else:
+                    R, CpR, PD1, PD2 = z
+                    C_bind = C_now
+                    dCt = None
+
+                dR = p["Kin_R"] - p["Kout_R"] * R - p["Kon"] * C_bind * R + p["Koff"] * CpR
+                dCpR = p["Kon"] * C_bind * R - p["Koff"] * CpR - p["keDR"] * CpR
+                E1 = emax_hill(CpR, p["Emax1"], p["EC50"], p["gamma"])
+                dPD1 = p["Kin_PD1m"] * (1 + E1) - p["Kout_PD1"] * PD1
+                dPD2 = p["Kout_PD1"] * PD1 - p["Kout_PD2"] * PD2
+                if use_ct:
+                    return [dR, dCpR, dCt, dPD1, dPD2]
+                return [dR, dCpR, dPD1, dPD2]
+
+            R0 = p["Kin_R"] / p["Kout_R"]
+            PD10 = p["Kin_PD1m"] / p["Kout_PD1"]
+            PD20 = PD10 * p["Kout_PD1"] / p["Kout_PD2"]
+            if use_ct:
+                z0 = [R0, 0.0, float(C_dense[0]), PD10, PD20]
+                z_dense = odeint(lambda z, tt: rhs(z, tt), z0, t_dense)
+                R_dense = z_dense[:, 4]
+            else:
+                z0 = [R0, 0.0, PD10, PD20]
+                z_dense = odeint(lambda z, tt: rhs(z, tt), z0, t_dense)
+                R_dense = z_dense[:, 3]
 
     else:
         raise ValueError(f"Unknown family: {fam}")
 
-    C_obs_clean = interp1d(t_dense, C_dense, kind="cubic")(t_obs)
-    R_obs_clean = interp1d(t_dense, R_dense, kind="cubic")(t_obs)
+    obs_times = np.asarray(t_obs if observation_times is None else observation_times, dtype=float).reshape(-1)
+    C_obs_clean = interp1d(t_dense, C_dense, kind="cubic")(obs_times)
+    R_obs_clean = interp1d(t_dense, R_dense, kind="cubic")(obs_times)
 
-    C_obs = C_obs_clean * (1.0 + np.random.normal(0, pk_noise_cv, size=t_obs.shape))
-    R_obs = R_obs_clean * (1.0 + np.random.normal(0, pd_noise_cv, size=t_obs.shape))
+    pk_cv = max(float(pk_noise_cv) * float(noise_scale), 0.0)
+    pd_cv = max(float(pd_noise_cv) * float(noise_scale), 0.0)
+    C_obs = C_obs_clean * (1.0 + np.random.normal(0, pk_cv, size=obs_times.shape))
+    R_obs = R_obs_clean * (1.0 + np.random.normal(0, pd_cv, size=obs_times.shape))
 
     C_obs = np.clip(C_obs, 0.0, None)
     R_obs = np.clip(R_obs, 1e-8, None)

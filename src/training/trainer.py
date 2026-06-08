@@ -4,6 +4,10 @@ import torch.nn.functional as F
 from deepymod.data import Dataset, get_train_test_loader
 
 
+class NonFiniteTrainingError(RuntimeError):
+    pass
+
+
 def build_train_loader(X_train, Y_train, device="cpu"):
     def data_loader_func_train():
         return X_train, Y_train
@@ -31,6 +35,12 @@ def train_epochs(
         yb = yb.to(next(model.parameters()).device)
 
         pred, dts, ths = model(xb)
+        if not torch.isfinite(pred).all():
+            raise NonFiniteTrainingError("Non-finite prediction detected during training.")
+        if any((not torch.isfinite(dt).all()) for dt in dts):
+            raise NonFiniteTrainingError("Non-finite temporal derivative detected during training.")
+        if any((not torch.isfinite(th).all()) for th in ths):
+            raise NonFiniteTrainingError("Non-finite library term detected during training.")
         if pred.shape[1] != yb.shape[1]:
             pred = pred[:, : yb.shape[1]]
         mse = torch.mean((pred - yb) ** 2)
@@ -42,6 +52,8 @@ def train_epochs(
 
         gamma_now = F.softplus(model.library.raw_gamma)
         loss = mse + lambda_reg * reg + lambda_gamma_pen * gamma_now
+        if not torch.isfinite(loss):
+            raise NonFiniteTrainingError("Non-finite loss detected during training.")
 
         opt_nn.zero_grad()
         opt_lib.zero_grad()
@@ -73,7 +85,11 @@ def eval_mse(model, X_eval, Y_eval):
     pred, _, _ = model(xb)
     if pred.shape[1] != yb.shape[1]:
         pred = pred[:, : yb.shape[1]]
+    if not torch.isfinite(pred).all():
+        return float("inf")
     mse = torch.mean((pred - yb) ** 2)
+    if not torch.isfinite(mse):
+        return float("inf")
     return float(mse.item())
 
 

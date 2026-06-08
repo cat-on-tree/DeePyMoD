@@ -20,6 +20,19 @@ from src.data.preprocess_pkpd import to_population_mean, build_tensors_from_agg,
 from src.configs.pd_module_registry import MODULE_COMBINATIONS
 
 
+def _flatten_term_universe(term_names):
+    if (
+        isinstance(term_names, (list, tuple))
+        and len(term_names) > 0
+        and isinstance(term_names[0], (list, tuple, np.ndarray))
+    ):
+        out = []
+        for names in term_names:
+            out.extend([str(x) for x in names])
+        return out
+    return [str(x) for x in term_names]
+
+
 def run_single_discovery(
     pop_data,
     active_model: str,
@@ -53,11 +66,19 @@ def run_single_discovery(
 
     # 2) model init
     use_tmdd_library = active_model in {"TMDD_BASE", "ANTIBODY_PKPD"}
+    strict_blind = bool(config.get("strict_blind_discovery", True))
+    prune_model = active_model if (use_tmdd_library or not strict_blind) else None
     if use_tmdd_library:
         module_combo = None
     if use_tmdd_library:
         use_ct = (active_model == "ANTIBODY_PKPD")
-        library = AntibodyTMDDLibrary(use_ct=use_ct, include_hill=True).to(device)
+        library = AntibodyTMDDLibrary(
+            use_ct=use_ct,
+            include_hill=config.get("tmdd_include_hill", True),
+            include_c_term=config.get("tmdd_include_c_term", True),
+            include_c_r_term=config.get("tmdd_include_c_r_term", True),
+            enforce_safe_r_terms=config.get("tmdd_enforce_safe_r_terms", True),
+        ).to(device)
         network = StateTimeNet(state_names=library.state_names).to(device)
         term_names = library.term_names()
     elif module_combo:
@@ -82,6 +103,14 @@ def run_single_discovery(
     else:
         n_terms = len(term_names)
         init_mask = torch.ones(n_terms, dtype=torch.bool, device=device)
+
+    forbidden_terms = list(config.get("forbidden_terms") or [])
+    allowed_terms = set(config.get("allowed_terms_by_profile") or [])
+    if allowed_terms:
+        all_terms = set(_flatten_term_universe(term_names))
+        extra_forbidden = sorted(list(all_terms.difference(allowed_terms)))
+        forbidden_terms = sorted(set(forbidden_terms).union(extra_forbidden))
+
     estimator = FixedMaskEstimator(init_mask).to(device)
     constraint = RidgeConstraint(lam=config["ridge_lam"]).to(device)
 
@@ -110,10 +139,13 @@ def run_single_discovery(
             coeff=coeff,
             old_mask=mask,
             term_names=term_names,
-            active_model=active_model,
+            active_model=prune_model,
             rel_thr_main=config["rel_thr_main"],
             rel_thr_interaction=config["rel_thr_interaction"],
             min_terms_keep=config["min_terms_keep"],
+            force_single_exposure_basis=bool(config.get("force_single_exposure_basis", False)),
+            mandatory_any_terms=config.get("mandatory_any_terms"),
+            forbidden_terms=forbidden_terms,
         )
 
         if is_multi:
@@ -173,6 +205,12 @@ def run_single_discovery(
         candidate_refit_epochs=config["candidate_refit_epochs"],
         lambda_reg=config["lambda_reg"],
         lambda_gamma_pen=config["lambda_gamma_pen"],
+        ranking_mode=config.get("ranking_mode", "candidate_search"),
+        required_any_terms=config.get("required_any_terms"),
+        interaction_keep_ratio=float(config.get("interaction_keep_ratio", 0.25)),
+        scoring_mode=config.get("scoring_mode", "bic"),
+        scoring_prior_weight=float(config.get("scoring_prior_weight", 1.0)),
+        forbidden_terms=forbidden_terms,
     )
 
     print("\n=== Top-K Candidate Structures (Validation BIC) ===")
